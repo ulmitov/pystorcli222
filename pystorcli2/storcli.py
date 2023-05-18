@@ -19,6 +19,7 @@ from typing import Optional, Dict, Any, List
 from . import common
 from . import exc
 from . import cmdRunner
+from .errors import StorcliError
 
 _SINGLETON_STORCLI_MODULE_LOCK = threading.Lock()
 _SINGLETON_STORCLI_MODULE_ENABLE = False
@@ -128,7 +129,7 @@ class StorCLI(object):
             self.__response_cache = value
 
     @staticmethod
-    def check_response_status(cmd: List[str], out: Dict[str, Dict[int, Dict[str, Any]]], allow_error_codes: List[int]) -> bool:
+    def check_response_status(cmd: List[str], out: Dict[str, Dict[int, Dict[str, Any]]], allow_error_codes: List[StorcliError]) -> bool:
         """Check ouput command line status from storcli.
 
         Args:
@@ -141,25 +142,47 @@ class StorCLI(object):
 
         Raises:
             StorCliCmdError: if error found in output and not allowed
+            StorCliCmdErrorCode: if error code found in output and not allowed
         """
+        retcode = True
         cmd_status = common.response_cmd(out)
         if cmd_status['Status'] == 'Failure':
             if 'Detailed Status' in cmd_status:
+                allowed_errors = True
                 # Check if the error code is allowed
                 for error in cmd_status['Detailed Status']:
+
                     if 'ErrCd' in error:
-                        if error['ErrCd'] in allow_error_codes:
-                            return False
+                        if StorcliError.get(error['ErrCd']) not in allow_error_codes:
+                            allowed_errors = False
+                    else:
+                        allowed_errors = False
+
+                    retcode = False
+                    if not allowed_errors:
+                        raise exc.StorCliCmdErrorCode(
+                            cmd, StorcliError.get(error['ErrCd']))
 
                 # Otherwise, raise an exception
-                raise exc.StorCliCmdError(
-                    cmd, "{0}".format(cmd_status['Detailed Status']))
+                if not allowed_errors:
+                    raise exc.StorCliCmdError(
+                        cmd, "{0}".format(cmd_status['Detailed Status']))
             else:
+                # Try to get the error code using description
+                if 'Description' in cmd_status:
+                    error_code = StorcliError.get(cmd_status['Description'])
+
+                    if error_code != StorcliError.INVALID_STATUS:
+                        if error_code not in allow_error_codes:
+                            raise exc.StorCliCmdErrorCode(cmd, error_code)
+                        else:
+                            return False
+
                 raise exc.StorCliCmdError(cmd, "{0}".format(cmd_status))
 
-        return True
+        return retcode
 
-    def run(self, args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, allow_error_codes: List[int] = [], **kwargs):
+    def run(self, args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, allow_error_codes: List[StorcliError] = [], **kwargs):
         """Execute storcli command line with arguments.
 
         Run command line and check output for errors.
@@ -168,7 +191,7 @@ class StorCLI(object):
             args (list of str): cmd line arguments (without binary)
             stdout (fd): controll subprocess stdout fd
             stderr (fd): controll subporcess stderr fd
-            allow_error_codes (list of int): list of error codes to allow
+            allow_error_codes (list of StorcliErrors): list of error codes to allow
             **kwargs: arguments to subprocess run
 
         Returns:
@@ -176,6 +199,7 @@ class StorCLI(object):
 
         Raises:
             exc.StorCliCmdError
+            exc.StorCliCmdErrorCode
             exc.StorCliRunTimeError
             exc.StorCliRunTimeout
         """
@@ -192,12 +216,17 @@ class StorCLI(object):
         with self.__cache_lock:
             try:
                 ret = self.__cmdrunner.run(
-                    args=cmd, stdout=stdout, stderr=stderr, universal_newlines=True, **kwargs)
+                    args=cmd, universal_newlines=True, **kwargs)
                 try:
                     ret_json = json.loads(ret.stdout)
                     self.check_response_status(
                         cmd, ret_json, allow_error_codes)
-                    ret.check_returncode()
+                    if ret.returncode != 0:
+                        allowd_return_codes = [
+                            i.value for i in allow_error_codes]
+                        if ret.returncode not in allowd_return_codes:
+                            raise subprocess.CalledProcessError(
+                                ret.returncode, cmd, ret.stdout, ret.stderr)
                     if self.cache_enable:
                         self.__response_cache[cmd_cache_key] = ret_json
                     return ret_json
