@@ -42,6 +42,7 @@ class Controller(object):
         patrolread (dict): current patrol read settings (also setter)
         cc (dict): current patrol read settings (also setter)
         has_foreign_configurations (bool): true if controller has foreign configurations
+        jbod (str): enables/disables JBOD mode; by default, drives become system drives.
 
     Methods:
         create_vd (:obj:VirtualDrive): create virtual drive
@@ -502,6 +503,38 @@ class Controller(object):
         if securitykey:
             args.append(f'securitykey={securitykey}')
         return common.response_cmd(self._run(args))
+
+    @property
+    @common.lower
+    def jbod(self):
+        """Get/Set jbod mode state
+
+        One of the following options can be set (str):
+            on - enables jbod mode
+            off - disables jbod mode
+
+        Returns:
+            (str): on / off
+        """
+        args = [
+            'show',
+            'jbod'
+        ]
+
+        for pr in common.response_property(self._run(args)):
+            if pr['Ctrl_Prop'] == "JBOD":
+                return pr['Value']
+        return 'off'
+
+    @jbod.setter
+    def jbod(self, value):
+        """
+        """
+        args = [
+            'set',
+            'jbod={0}'.format(value)
+        ]
+        return common.response_setter(self._run(args))
 
 
 class Controllers(object):
